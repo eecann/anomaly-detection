@@ -6,7 +6,7 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,7 +25,9 @@ ALERTS_CONFIG_PATH = CONFIG_DIR / "alerts.yaml"
 
 @dataclass
 class InferenceConfig:
-    best_model_info_path: Path
+    best_model_info_path: Path | None
+    model_path: Path | None
+    model_metadata_path: Path | None
     input_video_path: Path
     output_dir: Path
     sample_fps: float
@@ -37,6 +39,9 @@ class InferenceConfig:
     annotated_video_name: str
     event_log_name: str
     summary_name: str
+    live_preview: bool
+    preview_window_name: str
+    preview_wait_ms: int
 
 
 @dataclass
@@ -67,8 +72,15 @@ def load_inference_config(path: Path) -> InferenceConfig:
     cfg = load_yaml(path).get("inference", {})
     if not cfg:
         raise ValueError("inference.yaml icinde 'inference' bolumu bos.")
+
+    best_model_info_raw = str(cfg.get("best_model_info_path", "")).strip()
+    model_path_raw = str(cfg.get("model_path", "")).strip()
+    model_meta_raw = str(cfg.get("model_metadata_path", "")).strip()
+
     return InferenceConfig(
-        best_model_info_path=resolve_path(str(cfg["best_model_info_path"]), path.parent),
+        best_model_info_path=resolve_path(best_model_info_raw, path.parent) if best_model_info_raw else None,
+        model_path=resolve_path(model_path_raw, path.parent) if model_path_raw else None,
+        model_metadata_path=resolve_path(model_meta_raw, path.parent) if model_meta_raw else None,
         input_video_path=resolve_path(str(cfg["input_video_path"]), path.parent),
         output_dir=resolve_path(str(cfg.get("output_dir", "../outputs/inference")), path.parent),
         sample_fps=float(cfg.get("sample_fps", 5.0)),
@@ -80,6 +92,9 @@ def load_inference_config(path: Path) -> InferenceConfig:
         annotated_video_name=str(cfg.get("annotated_video_name", "annotated_output.mp4")),
         event_log_name=str(cfg.get("event_log_name", "anomaly_events.csv")),
         summary_name=str(cfg.get("summary_name", "inference_summary.json")),
+        live_preview=bool(cfg.get("live_preview", False)),
+        preview_window_name=str(cfg.get("preview_window_name", "Anomaly Detection Live Preview")),
+        preview_wait_ms=max(int(cfg.get("preview_wait_ms", 1)), 1),
     )
 
 
@@ -142,18 +157,46 @@ def _format_alert_message(
     )
 
 
+def _draw_overlay(
+    frame: np.ndarray,
+    status_text: str,
+    status_color: tuple[int, int, int],
+    line2: str,
+    line3: str,
+    line4: str,
+) -> None:
+    cv2.putText(frame, status_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, status_color, 2)
+    cv2.putText(frame, line2, (15, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
+    cv2.putText(frame, line3, (15, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
+    cv2.putText(frame, line4, (15, 114), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
+
+
 def run_video_inference() -> None:
     inference_cfg = load_inference_config(INFERENCE_CONFIG_PATH)
     telegram_cfg = load_telegram_config(ALERTS_CONFIG_PATH)
 
     if not inference_cfg.input_video_path.exists():
         raise FileNotFoundError(f"Video bulunamadi: {inference_cfg.input_video_path}")
-    if not inference_cfg.best_model_info_path.exists():
-        raise FileNotFoundError(f"best_model.json bulunamadi: {inference_cfg.best_model_info_path}")
 
-    model_info = json.loads(inference_cfg.best_model_info_path.read_text(encoding="utf-8"))
-    model_path = Path(model_info["model_path"])
-    model_metadata_path = Path(model_info["model_metadata_path"])
+    model_info: Dict[str, Any]
+    if inference_cfg.best_model_info_path is not None and inference_cfg.best_model_info_path.exists():
+        model_info = json.loads(inference_cfg.best_model_info_path.read_text(encoding="utf-8"))
+        model_path = Path(model_info["model_path"])
+        model_metadata_path = Path(model_info["model_metadata_path"])
+    elif inference_cfg.model_path is not None and inference_cfg.model_metadata_path is not None:
+        model_path = inference_cfg.model_path
+        model_metadata_path = inference_cfg.model_metadata_path
+        model_info = {
+            "model_path": str(model_path),
+            "model_metadata_path": str(model_metadata_path),
+            "model_key": None,
+        }
+    else:
+        raise FileNotFoundError(
+            "Model bilgisi bulunamadi. inference.yaml icinde ya gecerli best_model_info_path ver, "
+            "ya da model_path + model_metadata_path alanlarini doldur."
+        )
+
     if not model_path.exists():
         raise FileNotFoundError(f"Model bulunamadi: {model_path}")
     if not model_metadata_path.exists():
@@ -186,6 +229,7 @@ def run_video_inference() -> None:
         out_path = inference_cfg.output_dir / inference_cfg.annotated_video_name
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(out_path), fourcc, source_fps / sample_step, (width, height))
+    preview_enabled = inference_cfg.live_preview
 
     sequence_buffer: deque[np.ndarray] = deque(maxlen=sequence_length)
     event_rows: List[Dict[str, Any]] = []
@@ -194,8 +238,11 @@ def run_video_inference() -> None:
     total_predictions = 0
     total_alerts = 0
     model_inference_index = 0
+    last_overlay: Dict[str, Any] | None = None
 
     frame_idx = 0
+    if preview_enabled:
+        print("Canli izleme acik. Cikmak icin pencere aktifken 'q' tusuna bas.")
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -224,6 +271,7 @@ def run_video_inference() -> None:
             pred_prob = float(probs[pred_idx])
             anomaly_score = float(1.0 - probs[normal_class_idx])
             above_threshold = anomaly_score >= inference_cfg.threshold
+            status_label = "ANOMALY" if above_threshold else "NORMAL"
 
             if above_threshold:
                 consecutive += 1
@@ -258,24 +306,65 @@ def run_video_inference() -> None:
                     "anomaly_score": f"{anomaly_score:.6f}",
                     "threshold": f"{inference_cfg.threshold:.6f}",
                     "above_threshold": int(above_threshold),
+                    "status_label": status_label,
                     "consecutive_count": consecutive,
                     "alert_sent": int(alert_sent),
                 }
             )
 
-            if writer is not None:
-                display_text = (
-                    f"{pred_class} p={pred_prob:.2f} | anomaly={anomaly_score:.2f} "
-                    f"| cons={consecutive} | alert={int(alert_sent)}"
+            status_color = (0, 0, 255) if above_threshold else (0, 200, 0)
+            last_overlay = {
+                "status_text": f"{status_label}",
+                "status_color": status_color,
+                "line2": f"class={pred_class} p={pred_prob:.3f}",
+                "line3": f"anomaly={anomaly_score:.3f} threshold={inference_cfg.threshold:.3f}",
+                "line4": (
+                    f"consecutive={consecutive}/{inference_cfg.min_consecutive} "
+                    f"alert={int(alert_sent)}"
+                ),
+            }
+
+        should_draw = (writer is not None and do_sample) or preview_enabled
+        if should_draw:
+            if last_overlay is None:
+                _draw_overlay(
+                    frame,
+                    status_text="WARMUP",
+                    status_color=(0, 215, 255),
+                    line2=f"model={model_kind}",
+                    line3=f"threshold={inference_cfg.threshold:.3f}",
+                    line4="waiting for first prediction...",
                 )
-                cv2.putText(frame, display_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
+            else:
+                _draw_overlay(
+                    frame,
+                    status_text=str(last_overlay["status_text"]),
+                    status_color=last_overlay["status_color"],
+                    line2=str(last_overlay["line2"]),
+                    line3=str(last_overlay["line3"]),
+                    line4=str(last_overlay["line4"]),
+                )
+            if writer is not None and do_sample:
                 writer.write(frame)
+
+            if preview_enabled:
+                try:
+                    cv2.imshow(inference_cfg.preview_window_name, frame)
+                    key = cv2.waitKey(inference_cfg.preview_wait_ms) & 0xFF
+                    if key == ord("q"):
+                        print("Canli izleme kullanici tarafindan sonlandirildi (q).")
+                        break
+                except cv2.error as exc:
+                    print(f"[WARN] Canli izleme devre disi birakildi (imshow hatasi): {exc}")
+                    preview_enabled = False
 
         frame_idx += 1
 
     cap.release()
     if writer is not None:
         writer.release()
+    if inference_cfg.live_preview:
+        cv2.destroyAllWindows()
 
     event_log_path = inference_cfg.output_dir / inference_cfg.event_log_name
     with event_log_path.open("w", newline="", encoding="utf-8") as f:
@@ -289,6 +378,7 @@ def run_video_inference() -> None:
                 "anomaly_score",
                 "threshold",
                 "above_threshold",
+                "status_label",
                 "consecutive_count",
                 "alert_sent",
             ]
@@ -303,13 +393,14 @@ def run_video_inference() -> None:
                     row["anomaly_score"],
                     row["threshold"],
                     row["above_threshold"],
+                    row["status_label"],
                     row["consecutive_count"],
                     row["alert_sent"],
                 ]
             )
 
     summary_payload = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "input_video_path": str(inference_cfg.input_video_path),
         "model_path": str(model_path),
         "model_key": model_info.get("model_key"),
@@ -318,6 +409,7 @@ def run_video_inference() -> None:
         "threshold": inference_cfg.threshold,
         "min_consecutive": inference_cfg.min_consecutive,
         "cooldown_sec": inference_cfg.cooldown_sec,
+        "live_preview": inference_cfg.live_preview,
         "total_frames_read": frame_idx,
         "total_predictions": total_predictions,
         "total_alerts_sent": total_alerts,

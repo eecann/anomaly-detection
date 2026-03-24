@@ -1,6 +1,12 @@
 inference:
-  best_model_info_path: "../outputs/thesis_multiclass_benchmark_keras/reports/best_model.json"
-  input_video_path: "C:/Users/PC/Desktop/anomalydetection/sample_video.mp4"
+  # Secenek 1: Main pipeline ciktisi varsa best_model.json kullan.
+  best_model_info_path: ""
+
+  # Secenek 2: Tek model testinde dogrudan model + metadata ver.
+  model_path: "../outputs/smoke_local_efficientnet_v1/train/best_model.keras"
+  model_metadata_path: "../outputs/smoke_local_efficientnet_v1/train/model_metadata.json"
+
+  input_video_path: "C:/Users/PC/Desktop/anomalydetection/tekelcibaskini.mp4"
   output_dir: "../outputs/inference"
   sample_fps: 5.0
   threshold: 0.60
@@ -8,6 +14,9 @@ inference:
   cooldown_sec: 60
   sequence_stride: 1
   save_annotated_video: true
-  annotated_video_name: "annotated_output.mp4"
+  annotated_video_name: "annotated_output2.mp4"
   event_log_name: "anomaly_events.csv"
   summary_name: "inference_summary.json"
+  live_preview: true
+  preview_window_name: "Anomaly Detection Live Preview"
+  preview_wait_ms: 1
