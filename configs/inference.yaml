@@ -1,0 +1,13 @@
+inference:
+  best_model_info_path: "../outputs/thesis_multiclass_benchmark_keras/reports/best_model.json"
+  input_video_path: "C:/Users/PC/Desktop/anomalydetection/sample_video.mp4"
+  output_dir: "../outputs/inference"
+  sample_fps: 5.0
+  threshold: 0.60
+  min_consecutive: 3
+  cooldown_sec: 60
+  sequence_stride: 1
+  save_annotated_video: true
+  annotated_video_name: "annotated_output.mp4"
+  event_log_name: "anomaly_events.csv"
+  summary_name: "inference_summary.json"

@@ -1,0 +1,25 @@
+dataset:
+  data_root: "C:/Users/PC/Desktop/anomalydetection/archive"
+  seed: 42
+  image_size: 64
+  image_format: "png"
+  normal_class_name: "NormalVideos"
+  split:
+    train_ratio: 0.8
+    val_ratio: 0.1
+    test_ratio: 0.1
+  classes:
+    - Abuse
+    - Arrest
+    - Arson
+    - Assault
+    - Burglary
+    - Explosion
+    - Fighting
+    - NormalVideos
+    - RoadAccidents
+    - Robbery
+    - Shooting
+    - Shoplifting
+    - Stealing
+    - Vandalism

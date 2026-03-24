@@ -1,22 +1,12 @@
 from __future__ import annotations
 
-import argparse
-import json
 import random
-from collections import Counter, defaultdict
+import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".webp",
-}
 
 SPLIT_ALIASES = {
     "train": {"train"},
@@ -26,14 +16,22 @@ SPLIT_ALIASES = {
 
 
 @dataclass(frozen=True)
-class Sample:
+class FrameSample:
     path: Path
     class_name: str
     class_idx: int
+    video_id: str
+    frame_idx: int
 
 
-def is_image_file(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+@dataclass(frozen=True)
+class SequenceSample:
+    frame_paths: Tuple[Path, ...]
+    class_name: str
+    class_idx: int
+    video_key: str
+    start_frame: int
+    end_frame: int
 
 
 def _sorted_subdirs(folder: Path) -> List[Path]:
@@ -43,267 +41,324 @@ def _sorted_subdirs(folder: Path) -> List[Path]:
 def discover_split_dirs(data_root: Path) -> Dict[str, Path]:
     name_to_dir = {d.name.lower(): d for d in _sorted_subdirs(data_root)}
     split_dirs: Dict[str, Path] = {}
-
     for canonical_split, aliases in SPLIT_ALIASES.items():
         for alias in aliases:
             if alias in name_to_dir:
                 split_dirs[canonical_split] = name_to_dir[alias]
                 break
-
     return split_dirs
 
 
-def discover_class_dirs(folder: Path) -> Dict[str, Path]:
-    class_dirs = {}
-    for subdir in _sorted_subdirs(folder):
-        class_dirs[subdir.name] = subdir
-    return class_dirs
-
-
 def build_class_to_idx(class_names: Iterable[str]) -> Dict[str, int]:
-    sorted_names = sorted(set(class_names), key=lambda x: x.lower())
-    return {name: idx for idx, name in enumerate(sorted_names)}
+    ordered: List[str] = []
+    seen = set()
+    for class_name in class_names:
+        if class_name in seen:
+            continue
+        seen.add(class_name)
+        ordered.append(class_name)
+    return {name: idx for idx, name in enumerate(ordered)}
 
 
-def collect_samples_from_class_dirs(
-    class_dirs: Dict[str, Path], class_to_idx: Dict[str, int]
-) -> List[Sample]:
-    samples: List[Sample] = []
-
-    for class_name in sorted(class_dirs, key=lambda x: x.lower()):
-        class_dir = class_dirs[class_name]
-        image_paths = sorted(
-            [p for p in class_dir.rglob("*") if is_image_file(p)],
-            key=lambda p: str(p).lower(),
+def parse_video_and_frame(stem: str) -> Tuple[str, int]:
+    match = re.match(r"^(?P<video_id>.+)_(?P<frame_idx>\d+)$", stem)
+    if not match:
+        raise ValueError(
+            f"Dosya ismi video/frame formatina uymuyor: {stem}. "
+            "Beklenen kalip: <video_id>_<frame_index>.png"
         )
-        for image_path in image_paths:
-            samples.append(
-                Sample(path=image_path, class_name=class_name, class_idx=class_to_idx[class_name])
-            )
+    return match.group("video_id"), int(match.group("frame_idx"))
 
+
+def _collect_frame_samples_from_class_dir(
+    class_dir: Path,
+    class_name: str,
+    class_idx: int,
+    image_extensions: Tuple[str, ...],
+) -> List[FrameSample]:
+    records: List[FrameSample] = []
+    for path in sorted(class_dir.rglob("*"), key=lambda p: str(p).lower()):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in image_extensions:
+            continue
+        video_id, frame_idx = parse_video_and_frame(path.stem)
+        records.append(
+            FrameSample(
+                path=path,
+                class_name=class_name,
+                class_idx=class_idx,
+                video_id=video_id,
+                frame_idx=frame_idx,
+            )
+        )
+    return records
+
+
+def _collect_from_split_dir(
+    split_dir: Path,
+    class_to_idx: Dict[str, int],
+    image_extensions: Tuple[str, ...],
+) -> List[FrameSample]:
+    samples: List[FrameSample] = []
+    for class_dir in _sorted_subdirs(split_dir):
+        class_name = class_dir.name
+        if class_name not in class_to_idx:
+            continue
+        class_idx = class_to_idx[class_name]
+        samples.extend(
+            _collect_frame_samples_from_class_dir(
+                class_dir=class_dir,
+                class_name=class_name,
+                class_idx=class_idx,
+                image_extensions=image_extensions,
+            )
+        )
     return samples
 
 
-def class_counts(samples: Iterable[Sample]) -> Counter:
-    return Counter(s.class_name for s in samples)
+def _video_key(sample: FrameSample) -> str:
+    return f"{sample.class_name}/{sample.video_id}"
 
 
-def _ratio_counts(n_items: int, ratios: Tuple[float, float, float]) -> Tuple[int, int, int]:
-    if n_items == 0:
-        return 0, 0, 0
+def _split_video_keys_by_class(
+    samples: List[FrameSample],
+    seed: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+) -> Dict[str, set[str]]:
+    if min(train_ratio, val_ratio, test_ratio) < 0:
+        raise ValueError("Split oranlari negatif olamaz.")
 
-    if any(r < 0 for r in ratios):
-        raise ValueError("Split ratios must be non-negative.")
-
-    total = sum(ratios)
+    total = train_ratio + val_ratio + test_ratio
     if total <= 0:
-        raise ValueError("At least one split ratio must be positive.")
+        raise ValueError("Split oranlarinin toplami sifirdan buyuk olmali.")
 
-    normalized = [r / total for r in ratios]
-    raw = [n_items * r for r in normalized]
-    counts = [int(x) for x in raw]
+    nr_train = train_ratio / total
+    nr_val = val_ratio / total
 
-    remaining = n_items - sum(counts)
-    remainder_order = sorted(
-        range(3), key=lambda i: (raw[i] - counts[i], normalized[i]), reverse=True
-    )
-    for i in remainder_order:
-        if remaining == 0:
-            break
-        counts[i] += 1
-        remaining -= 1
-
-    positive_targets = [i for i, r in enumerate(normalized) if r > 0]
-    if n_items >= len(positive_targets):
-        for i in positive_targets:
-            if counts[i] == 0:
-                donor = max(
-                    (j for j in range(3) if counts[j] > 1),
-                    key=lambda j: counts[j],
-                    default=None,
-                )
-                if donor is None:
-                    break
-                counts[donor] -= 1
-                counts[i] += 1
-
-    return counts[0], counts[1], counts[2]
-
-
-def stratified_split(
-    samples: List[Sample],
-    train_ratio: float,
-    val_ratio: float,
-    test_ratio: float,
-    seed: int,
-) -> Dict[str, List[Sample]]:
-    by_class: Dict[str, List[Sample]] = defaultdict(list)
+    class_to_video_keys: Dict[str, List[str]] = defaultdict(list)
     for sample in samples:
-        by_class[sample.class_name].append(sample)
+        class_to_video_keys[sample.class_name].append(_video_key(sample))
 
-    train_split: List[Sample] = []
-    val_split: List[Sample] = []
-    test_split: List[Sample] = []
+    split_keys = {"train": set(), "val": set(), "test": set()}
 
-    for class_name in sorted(by_class, key=lambda x: x.lower()):
-        class_samples = sorted(by_class[class_name], key=lambda s: str(s.path).lower())
-        class_rng = random.Random(f"{seed}:{class_name}")
-        class_rng.shuffle(class_samples)
+    for class_name, keys in class_to_video_keys.items():
+        unique_keys = sorted(set(keys))
+        rng = random.Random(f"{seed}:{class_name}:video_split")
+        rng.shuffle(unique_keys)
 
-        n_train, n_val, n_test = _ratio_counts(
-            len(class_samples), (train_ratio, val_ratio, test_ratio)
-        )
+        n = len(unique_keys)
+        n_train = int(n * nr_train)
+        n_val = int(n * nr_val)
+        n_test = n - n_train - n_val
 
-        train_split.extend(class_samples[:n_train])
-        val_split.extend(class_samples[n_train : n_train + n_val])
-        test_split.extend(class_samples[n_train + n_val : n_train + n_val + n_test])
+        if n >= 3:
+            if n_train == 0:
+                n_train = 1
+            if n_val == 0:
+                n_val = 1
+            n_test = max(1, n - n_train - n_val)
+            while n_train + n_val + n_test > n:
+                if n_train >= n_val and n_train > 1:
+                    n_train -= 1
+                elif n_val > 1:
+                    n_val -= 1
+                else:
+                    n_test -= 1
 
-    for split_name, split_samples in (
-        ("train", train_split),
-        ("val", val_split),
-        ("test", test_split),
-    ):
-        split_samples.sort(key=lambda s: str(s.path).lower())
-        split_rng = random.Random(f"{seed}:{split_name}")
-        split_rng.shuffle(split_samples)
+        train_keys = unique_keys[:n_train]
+        val_keys = unique_keys[n_train : n_train + n_val]
+        test_keys = unique_keys[n_train + n_val :]
+        if len(test_keys) != n_test:
+            test_keys = unique_keys[n_train + n_val : n_train + n_val + n_test]
 
-    return {"train": train_split, "val": val_split, "test": test_split}
+        split_keys["train"].update(train_keys)
+        split_keys["val"].update(val_keys)
+        split_keys["test"].update(test_keys)
 
-
-def inspect_dataset_layout(data_root: Path) -> None:
-    split_dirs = discover_split_dirs(data_root)
-    if split_dirs:
-        print("Detected split-style dataset layout:")
-        for split_name in ("train", "val", "test"):
-            if split_name in split_dirs:
-                class_dirs = discover_class_dirs(split_dirs[split_name])
-                print(
-                    f"  {split_name}: {split_dirs[split_name]} "
-                    f"({len(class_dirs)} class folders)"
-                )
-    else:
-        class_dirs = discover_class_dirs(data_root)
-        print("Detected class-folder dataset layout:")
-        print(f"  root: {data_root} ({len(class_dirs)} class folders)")
+    return split_keys
 
 
-def prepare_splits(
+def _samples_by_video_keys(samples: List[FrameSample], selected_keys: set[str]) -> List[FrameSample]:
+    return [s for s in samples if _video_key(s) in selected_keys]
+
+
+def _split_train_into_train_val_by_video(
+    train_samples: List[FrameSample],
+    seed: int,
+    train_ratio: float,
+    val_ratio: float,
+) -> Tuple[List[FrameSample], List[FrameSample]]:
+    if train_ratio < 0 or val_ratio < 0:
+        raise ValueError("train_ratio ve val_ratio negatif olamaz.")
+    if train_ratio + val_ratio <= 0:
+        raise ValueError("train_ratio + val_ratio sifirdan buyuk olmali.")
+
+    by_class_video_keys: Dict[str, List[str]] = defaultdict(list)
+    for sample in train_samples:
+        by_class_video_keys[sample.class_name].append(_video_key(sample))
+
+    train_keys: set[str] = set()
+    val_keys: set[str] = set()
+    val_share = val_ratio / (train_ratio + val_ratio)
+
+    for class_name, keys in by_class_video_keys.items():
+        unique_keys = sorted(set(keys))
+        rng = random.Random(f"{seed}:{class_name}:train_val_video_split")
+        rng.shuffle(unique_keys)
+        n_val = int(len(unique_keys) * val_share)
+        if len(unique_keys) >= 2 and n_val == 0:
+            n_val = 1
+        val_set = set(unique_keys[:n_val])
+        train_set = set(unique_keys[n_val:])
+        if not train_set and val_set:
+            one_key = next(iter(val_set))
+            val_set.remove(one_key)
+            train_set.add(one_key)
+        train_keys.update(train_set)
+        val_keys.update(val_set)
+
+    return _samples_by_video_keys(train_samples, train_keys), _samples_by_video_keys(train_samples, val_keys)
+
+
+def prepare_frame_splits(
     data_root: Path,
+    class_names: List[str],
+    seed: int,
     train_ratio: float,
     val_ratio: float,
     test_ratio: float,
-    seed: int,
-) -> Tuple[Dict[str, int], Dict[str, List[Sample]]]:
+    image_format: str = "png",
+) -> Tuple[Dict[str, int], Dict[str, List[FrameSample]]]:
+    if not data_root.exists():
+        raise FileNotFoundError(f"Dataset root bulunamadi: {data_root}")
+
+    ext = image_format.lower().strip().lstrip(".")
+    image_extensions = (f".{ext}",)
+    class_to_idx = build_class_to_idx(class_names)
     split_dirs = discover_split_dirs(data_root)
 
     if split_dirs:
-        split_class_dirs = {
-            split_name: discover_class_dirs(split_path)
-            for split_name, split_path in split_dirs.items()
-        }
-        all_class_names = set()
-        for class_dirs in split_class_dirs.values():
-            all_class_names.update(class_dirs.keys())
-        class_to_idx = build_class_to_idx(all_class_names)
+        split_to_samples: Dict[str, List[FrameSample]] = {}
+        for split_name, split_dir in split_dirs.items():
+            split_to_samples[split_name] = _collect_from_split_dir(
+                split_dir=split_dir,
+                class_to_idx=class_to_idx,
+                image_extensions=image_extensions,
+            )
 
-        split_to_samples = {
-            split_name: collect_samples_from_class_dirs(class_dirs, class_to_idx)
-            for split_name, class_dirs in split_class_dirs.items()
-        }
-
-        has_train = "train" in split_to_samples
-        has_val = "val" in split_to_samples
-        has_test = "test" in split_to_samples
+        has_train = "train" in split_to_samples and bool(split_to_samples["train"])
+        has_val = "val" in split_to_samples and bool(split_to_samples["val"])
+        has_test = "test" in split_to_samples and bool(split_to_samples["test"])
 
         if has_train and has_test and not has_val:
-            tv_total = train_ratio + val_ratio
-            if tv_total <= 0:
-                raise ValueError("train_ratio + val_ratio must be > 0 when creating val from train.")
-
-            train_rel = train_ratio / tv_total
-            val_rel = val_ratio / tv_total
-            train_and_val = stratified_split(
-                split_to_samples["train"], train_rel, val_rel, 0.0, seed
+            new_train, new_val = _split_train_into_train_val_by_video(
+                train_samples=split_to_samples["train"],
+                seed=seed,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
             )
-            split_to_samples["train"] = train_and_val["train"]
-            split_to_samples["val"] = train_and_val["val"]
+            split_to_samples["train"] = new_train
+            split_to_samples["val"] = new_val
 
         elif has_train and not has_val and not has_test:
-            split_to_samples = stratified_split(
-                split_to_samples["train"], train_ratio, val_ratio, test_ratio, seed
+            split_video_keys = _split_video_keys_by_class(
+                samples=split_to_samples["train"],
+                seed=seed,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
             )
+            all_train = split_to_samples["train"]
+            split_to_samples["train"] = _samples_by_video_keys(all_train, split_video_keys["train"])
+            split_to_samples["val"] = _samples_by_video_keys(all_train, split_video_keys["val"])
+            split_to_samples["test"] = _samples_by_video_keys(all_train, split_video_keys["test"])
         else:
             split_to_samples.setdefault("train", [])
             split_to_samples.setdefault("val", [])
             split_to_samples.setdefault("test", [])
 
+        for split_name in ("train", "val", "test"):
+            split_to_samples[split_name].sort(key=lambda s: str(s.path).lower())
+
         return class_to_idx, split_to_samples
 
-    class_dirs = discover_class_dirs(data_root)
-    if not class_dirs:
-        raise FileNotFoundError(
-            f"No class folders found in: {data_root}. "
-            "Expected folders like <root>/<class_name>/image.png"
+    all_samples: List[FrameSample] = []
+    for class_dir in _sorted_subdirs(data_root):
+        class_name = class_dir.name
+        if class_name not in class_to_idx:
+            continue
+        all_samples.extend(
+            _collect_frame_samples_from_class_dir(
+                class_dir=class_dir,
+                class_name=class_name,
+                class_idx=class_to_idx[class_name],
+                image_extensions=image_extensions,
+            )
         )
 
-    class_to_idx = build_class_to_idx(class_dirs.keys())
-    all_samples = collect_samples_from_class_dirs(class_dirs, class_to_idx)
-    split_to_samples = stratified_split(all_samples, train_ratio, val_ratio, test_ratio, seed)
+    split_video_keys = _split_video_keys_by_class(
+        samples=all_samples,
+        seed=seed,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+    )
+
+    split_to_samples = {
+        "train": _samples_by_video_keys(all_samples, split_video_keys["train"]),
+        "val": _samples_by_video_keys(all_samples, split_video_keys["val"]),
+        "test": _samples_by_video_keys(all_samples, split_video_keys["test"]),
+    }
+    for split_name in ("train", "val", "test"):
+        split_to_samples[split_name].sort(key=lambda s: str(s.path).lower())
     return class_to_idx, split_to_samples
 
 
-def print_class_distributions(
-    class_to_idx: Dict[str, int], split_to_samples: Dict[str, List[Sample]]
-) -> None:
-    ordered_classes = sorted(class_to_idx, key=lambda x: class_to_idx[x])
+def build_sequence_samples(
+    frame_samples: List[FrameSample],
+    sequence_length: int,
+    stride: int,
+) -> List[SequenceSample]:
+    if sequence_length <= 0:
+        raise ValueError("sequence_length sifirdan buyuk olmali.")
+    if stride <= 0:
+        raise ValueError("stride sifirdan buyuk olmali.")
 
-    print("\nClass-to-index mapping:")
-    print(json.dumps(class_to_idx, indent=2))
+    by_video: Dict[str, List[FrameSample]] = defaultdict(list)
+    for sample in frame_samples:
+        by_video[_video_key(sample)].append(sample)
 
-    for split_name in ("train", "val", "test"):
-        samples = split_to_samples.get(split_name, [])
-        counts = class_counts(samples)
-        print(f"\n{split_name.upper()} ({len(samples)} images)")
-        for class_name in ordered_classes:
-            print(f"  {class_name:15s} -> {counts.get(class_name, 0)}")
+    sequence_samples: List[SequenceSample] = []
+    for video_key, samples in by_video.items():
+        ordered = sorted(samples, key=lambda s: s.frame_idx)
+        n = len(ordered)
+        if n < sequence_length:
+            continue
 
+        class_name = ordered[0].class_name
+        class_idx = ordered[0].class_idx
+        for start in range(0, n - sequence_length + 1, stride):
+            chunk = ordered[start : start + sequence_length]
+            sequence_samples.append(
+                SequenceSample(
+                    frame_paths=tuple(s.path for s in chunk),
+                    class_name=class_name,
+                    class_idx=class_idx,
+                    video_key=video_key,
+                    start_frame=chunk[0].frame_idx,
+                    end_frame=chunk[-1].frame_idx,
+                )
+            )
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Load image dataset from class folders, build class mapping, "
-            "print class counts, and create reproducible train/val/test splits."
-        )
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        required=True,
-        help=(
-            "Dataset root. Supports either:\n"
-            "1) <root>/<class_name>/<images>\n"
-            "2) <root>/Train|Test|Val/<class_name>/<images>"
-        ),
-    )
-    parser.add_argument("--train-ratio", type=float, default=0.8)
-    parser.add_argument("--val-ratio", type=float, default=0.1)
-    parser.add_argument("--test-ratio", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-
-    if not args.data_root.exists():
-        raise FileNotFoundError(f"Path does not exist: {args.data_root}")
-
-    inspect_dataset_layout(args.data_root)
-    class_to_idx, split_to_samples = prepare_splits(
-        data_root=args.data_root,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
-        seed=args.seed,
-    )
-    print_class_distributions(class_to_idx, split_to_samples)
+    sequence_samples.sort(key=lambda s: (s.video_key, s.start_frame))
+    return sequence_samples
 
 
-if __name__ == "__main__":
-    main()
+def class_counts(samples: List[FrameSample] | List[SequenceSample]) -> Dict[str, int]:
+    counts: Dict[str, int] = defaultdict(int)
+    for sample in samples:
+        counts[sample.class_name] += 1
+    return dict(sorted(counts.items(), key=lambda x: x[0].lower()))

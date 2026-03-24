@@ -1,0 +1,46 @@
+run:
+  name: "thesis_multiclass_benchmark_keras"
+  output_root: "../outputs"
+  selection_metric: "test_macro_f1"
+
+training_defaults:
+  image_size: 64
+  batch_size: 64
+  epochs: 10
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  num_workers: 2
+  sequence_length: 20
+  train_stride: 5
+  eval_stride: 10
+  max_train_samples: 0
+  max_val_samples: 0
+
+evaluation_defaults:
+  batch_size: 128
+  num_workers: 2
+  max_test_samples: 0
+
+experiments:
+  # Colab'da tek tek kosmak icin bir modeli enabled:true, digerlerini false yap.
+  - name: "mobilenetv2_image"
+    enabled: true
+    model_key: "mobilenetv2_image"
+
+  - name: "efficientnetb0_image"
+    enabled: false
+    model_key: "efficientnetb0_image"
+
+  - name: "cnn_lstm_temporal"
+    enabled: false
+    model_key: "cnn_lstm_temporal"
+    sequence_length: 20
+    train_stride: 5
+    eval_stride: 10
+
+  - name: "convlstm_temporal"
+    enabled: false
+    model_key: "convlstm_temporal"
+    sequence_length: 20
+    train_stride: 5
+    eval_stride: 10
