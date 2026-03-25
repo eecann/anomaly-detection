@@ -59,6 +59,17 @@ Her deneyin kendi klasorunde:
 
 ### Ortam degiskenleri
 
+`.env` (onerilen):
+
+```bash
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+Not: `inference.py` calisirken proje kokundeki `.env` dosyasini otomatik yukler.
+
+ya da terminalden:
+
 ```bash
 set TELEGRAM_BOT_TOKEN=...
 set TELEGRAM_CHAT_ID=...

@@ -61,6 +61,24 @@ def load_yaml(path: Path) -> Dict[str, Any]:
     return data
 
 
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def resolve_path(raw_path: str, base_dir: Path) -> Path:
     p = Path(raw_path)
     if p.is_absolute():
@@ -172,6 +190,7 @@ def _draw_overlay(
 
 
 def run_video_inference() -> None:
+    load_env_file(PROJECT_ROOT / ".env")
     inference_cfg = load_inference_config(INFERENCE_CONFIG_PATH)
     telegram_cfg = load_telegram_config(ALERTS_CONFIG_PATH)
 
@@ -271,9 +290,11 @@ def run_video_inference() -> None:
             pred_prob = float(probs[pred_idx])
             anomaly_score = float(1.0 - probs[normal_class_idx])
             above_threshold = anomaly_score >= inference_cfg.threshold
-            status_label = "ANOMALY" if above_threshold else "NORMAL"
+            is_non_normal_class = pred_idx != normal_class_idx
+            should_alert = above_threshold and is_non_normal_class
+            status_label = "ANOMALY" if should_alert else "NORMAL"
 
-            if above_threshold:
+            if should_alert:
                 consecutive += 1
             else:
                 consecutive = 0
@@ -281,7 +302,7 @@ def run_video_inference() -> None:
             timestamp_sec = frame_idx / source_fps
             now_wall = time.time()
             if (
-                above_threshold
+                should_alert
                 and consecutive >= inference_cfg.min_consecutive
                 and (now_wall - last_alert_walltime) >= inference_cfg.cooldown_sec
             ):
@@ -293,8 +314,8 @@ def run_video_inference() -> None:
                     threshold=inference_cfg.threshold,
                 )
                 alert_sent = _send_telegram_message(telegram_cfg, msg)
-                last_alert_walltime = now_wall
                 if alert_sent:
+                    last_alert_walltime = now_wall
                     total_alerts += 1
 
             event_rows.append(
@@ -312,7 +333,7 @@ def run_video_inference() -> None:
                 }
             )
 
-            status_color = (0, 0, 255) if above_threshold else (0, 200, 0)
+            status_color = (0, 0, 255) if should_alert else (0, 200, 0)
             last_overlay = {
                 "status_text": f"{status_label}",
                 "status_color": status_color,
@@ -320,7 +341,7 @@ def run_video_inference() -> None:
                 "line3": f"anomaly={anomaly_score:.3f} threshold={inference_cfg.threshold:.3f}",
                 "line4": (
                     f"consecutive={consecutive}/{inference_cfg.min_consecutive} "
-                    f"alert={int(alert_sent)}"
+                    f"eligible={int(should_alert)} alert={int(alert_sent)}"
                 ),
             }
 

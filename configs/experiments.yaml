@@ -24,7 +24,7 @@ evaluation_defaults:
 experiments:
   # Colab'da tek tek kosmak icin bir modeli enabled:true, digerlerini false yap.
   - name: "mobilenetv2_image"
-    enabled: true
+    enabled: false
     model_key: "mobilenetv2_image"
 
   - name: "efficientnetb0_image"
@@ -32,7 +32,7 @@ experiments:
     model_key: "efficientnetb0_image"
 
   - name: "cnn_lstm_temporal"
-    enabled: false
+    enabled: true
     model_key: "cnn_lstm_temporal"
     sequence_length: 20
     train_stride: 5
