@@ -42,6 +42,10 @@ Hizli smoke test icin `configs/experiments.yaml` icerisinde gecici olarak su deg
 - `max_val_samples: 300`
 - `max_test_samples: 800`
 
+Sinif dengesizligi icin varsayilan olarak class weight aciktir:
+- `use_class_weights: true`
+- `max_class_weight: 10.0`
+
 Uretilen ana rapor dosyalari:
 
 - `outputs/<run_name>/reports/experiment_summary.csv`

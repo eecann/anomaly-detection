@@ -217,6 +217,8 @@ def run_all_experiments() -> None:
         num_workers = int(experiment.get("num_workers", training_defaults.get("num_workers", 2)))
         max_train_samples = int(experiment.get("max_train_samples", training_defaults.get("max_train_samples", 0)))
         max_val_samples = int(experiment.get("max_val_samples", training_defaults.get("max_val_samples", 0)))
+        use_class_weights = bool(experiment.get("use_class_weights", training_defaults.get("use_class_weights", True)))
+        max_class_weight = float(experiment.get("max_class_weight", training_defaults.get("max_class_weight", 10.0)))
         sequence_length = int(experiment.get("sequence_length", training_defaults.get("sequence_length", 20)))
         train_stride = int(experiment.get("train_stride", training_defaults.get("train_stride", 5)))
         eval_stride = int(experiment.get("eval_stride", training_defaults.get("eval_stride", 10)))
@@ -245,6 +247,8 @@ def run_all_experiments() -> None:
             eval_stride=eval_stride,
             max_train_samples=max_train_samples,
             max_val_samples=max_val_samples,
+            use_class_weights=use_class_weights,
+            max_class_weight=max_class_weight,
             checkpoint_path=train_dir / "best_model.keras",
             history_csv_path=train_dir / "history.csv",
             history_json_path=train_dir / "history.json",
@@ -299,6 +303,8 @@ def run_all_experiments() -> None:
             "model_kind": model_kind,
             "epochs": epochs,
             "batch_size": batch_size,
+            "use_class_weights": int(use_class_weights),
+            "max_class_weight": max_class_weight,
             "image_size": image_size,
             "sequence_length": sequence_length if model_kind == "temporal" else "",
             "best_epoch": train_result.best_epoch,

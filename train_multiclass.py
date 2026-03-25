@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import random
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Literal, TypeVar
@@ -49,6 +50,8 @@ class TrainConfig:
     eval_stride: int
     max_train_samples: int
     max_val_samples: int
+    use_class_weights: bool
+    max_class_weight: float
     checkpoint_path: Path
     history_csv_path: Path
     history_json_path: Path
@@ -348,9 +351,32 @@ def _save_metadata(config: TrainConfig, class_to_idx: Dict[str, int], normal_cla
         "sequence_length": config.sequence_length if config.model_kind == "temporal" else None,
         "train_stride": config.train_stride if config.model_kind == "temporal" else None,
         "eval_stride": config.eval_stride if config.model_kind == "temporal" else None,
+        "use_class_weights": config.use_class_weights,
+        "max_class_weight": config.max_class_weight,
     }
     config.metadata_json_path.parent.mkdir(parents=True, exist_ok=True)
     config.metadata_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _compute_balanced_class_weights(
+    samples: List[FrameSample] | List[SequenceSample],
+    num_classes: int,
+    max_class_weight: float,
+) -> Dict[int, float]:
+    if not samples:
+        return {}
+    counts = Counter(s.class_idx for s in samples)
+    n_samples = float(len(samples))
+    class_weights: Dict[int, float] = {}
+    for class_idx in range(num_classes):
+        count = counts.get(class_idx, 0)
+        if count <= 0:
+            continue
+        weight = n_samples / (num_classes * float(count))
+        if max_class_weight > 0:
+            weight = min(weight, max_class_weight)
+        class_weights[class_idx] = float(weight)
+    return class_weights
 
 
 def run_training_experiment(
@@ -443,6 +469,20 @@ def run_training_experiment(
     print(f"Train sample sayisi: {len(train_samples)}")
     print(f"Val sample sayisi  : {len(val_samples)}")
 
+    class_weights = (
+        _compute_balanced_class_weights(
+            samples=train_samples,
+            num_classes=len(config.class_names),
+            max_class_weight=config.max_class_weight,
+        )
+        if config.use_class_weights
+        else None
+    )
+    if class_weights is not None:
+        print("Class weights (balanced):", {k: round(v, 4) for k, v in class_weights.items()})
+    else:
+        print("Class weights: kapali")
+
     model = build_model(
         model_key=config.model_key,
         image_size=config.image_size,
@@ -476,6 +516,7 @@ def run_training_experiment(
         train_dataset,
         validation_data=val_dataset,
         epochs=config.epochs,
+        class_weight=class_weights,
         callbacks=[macro_f1_callback, epoch_log_callback, early_stop],
         verbose=0,
     )
